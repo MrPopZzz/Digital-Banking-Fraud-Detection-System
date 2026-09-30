@@ -1,111 +1,268 @@
 # Digital Banking & Fraud Detection System
 
-An event-driven microservices backend that simulates a real digital banking flow: a sender transfers money to a receiver, every transaction is screened for fraud, failed or suspicious transfers are refunded automatically, and users are notified at each step.
+An **event-driven digital banking backend** built with **Java and Spring Boot**, designed using a **microservices architecture** to simulate secure money transfers, real-time fraud detection, asynchronous notifications, OTP verification, and compensating refunds.
 
-Built with **Java, Spring Boot, Apache Kafka, MySQL, Redis and Docker**.
+The system uses **Apache Kafka** for asynchronous communication, **Redis** for short-lived OTP storage, **MySQL** for persistent data, and **Docker Compose** for containerized infrastructure.
 
----
-
-## Table of Contents
-
-- [Features](#features)
-- [Architecture](#architecture)
-- [Services](#services)
-- [Transaction Flow](#transaction-flow)
-- [Tech Stack](#tech-stack)
-- [Getting Started](#getting-started)
-- [API Reference](#api-reference)
-- [Design Decisions](#design-decisions)
-- [Project Structure](#project-structure)
-- [Future Improvements](#future-improvements)
-- [Author](#author)
+> **Goal:** Model how a distributed banking system can process a transaction, evaluate it for fraud, complete or compensate the transaction, and notify users without tightly coupling individual services.
 
 ---
 
-## Features
+## Key Features
 
-- **Money transfers** between sender and receiver accounts
-- **Real-time fraud detection** on every transaction before it is finalized
-- **Automatic refunds** when a transfer fails or is flagged
-- **OTP verification** with short-lived codes stored in Redis
-- **Asynchronous notifications** (transaction success, failure, refund, fraud alert)
-- **API Gateway** as the single entry point for all client requests
-- **Event-driven communication** between services using Kafka
-- **Centralized error handling** with consistent error responses
-- **One-command startup** using Docker Compose
+* **Money Transfer** — Transfer funds between sender and receiver accounts.
+* **Real-Time Fraud Detection** — Evaluate transactions against configurable fraud rules before completion.
+* **Compensating Refunds** — Automatically refund transactions when fraud is detected or payment processing fails.
+* **OTP Verification** — Generate and store short-lived OTPs using Redis TTL.
+* **Event-Driven Architecture** — Services communicate asynchronously through Apache Kafka.
+* **Asynchronous Notifications** — Process transaction success, failure, refund, and fraud events independently.
+* **API Gateway** — Provides a single entry point and routes requests to internal services.
+* **Database per Service** — Each service maintains ownership of its persistent data.
+* **Dockerized Environment** — Infrastructure and services can be started using Docker Compose.
+* **Centralized Error Handling** — Consistent error responses across REST APIs.
 
 ---
 
 ## Architecture
 
+```text
+                           ┌───────────────────┐
+                           │      Client       │
+                           └─────────┬─────────┘
+                                     │
+                                     ▼
+                           ┌───────────────────┐
+                           │    API Gateway    │
+                           │  Routing / Entry  │
+                           └─────────┬─────────┘
+                                     │
+              ┌──────────────────────┼──────────────────────┐
+              │                      │                      │
+              ▼                      ▼                      ▼
+      ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+      │    Account   │      │ Transaction  │      │   Payment    │
+      │    Service   │      │    Service   │      │   Service    │
+      └──────┬───────┘      └──────┬───────┘      └──────┬───────┘
+             │                     │                     │
+             │                     └──────────┬──────────┘
+             │                                │
+             │                                ▼
+             │                        ┌──────────────┐
+             │                        │ Apache Kafka │
+             │                        └──────┬───────┘
+             │                               │
+             │                 ┌─────────────┴─────────────┐
+             │                 ▼                           ▼
+             │        ┌──────────────────┐       ┌──────────────────┐
+             └───────►│ Fraud Detection  │       │  Notification    │
+                      │     Service      │       │     Service      │
+                      └────────┬─────────┘       └──────────────────┘
+                               │
+                               ▼
+                         Fraud Result
+                               │
+                               ▼
+                      Account / Transaction
+                         State Update
+
+
+      MySQL → Persistent banking and transaction data
+      Redis → OTP storage with expiration (TTL)
 ```
-                         +----------------+
-        Client  ───────► |  API Gateway   |
-                         +-------+--------+
-                                 │
-          ┌──────────────┬───────┴────────┬──────────────┐
-          ▼              ▼                ▼              ▼
-   +-------------+ +--------------+ +-------------+ +-----------------+
-   |  Account    | | Transaction  | |  Payment    | | Fraud Detection |
-   |  Service    | | Service      | |  Service    | | Service         |
-   +------+------+ +------+-------+ +------+------+ +--------+--------+
-          │               │                │                 │
-          └───────────────┴──── Kafka ─────┴─────────────────┘
-                                 │
-                                 ▼
-                       +--------------------+
-                       | Notification       |
-                       | Service            |
-                       +--------------------+
-
-   MySQL  → persistent data (accounts, transactions, payments)
-   Redis  → OTP storage with TTL
-```
-
----
-
-## Services
-
-| Service | Responsibility |
-|---|---|
-| `api-gateway` | Single entry point. Routes requests to the right service. |
-| `account-service` | Manages user accounts and balances. Handles debit/credit operations. |
-| `transaction-service` | Creates and tracks transactions and their lifecycle status. |
-| `payment-service` | Executes the actual money movement between sender and receiver. |
-| `fraud-detection-service` | Evaluates each transaction against fraud rules and flags suspicious ones. |
-| `notification-service` | Consumes events and notifies users about transaction outcomes. |
 
 ---
 
 ## Transaction Flow
 
-1. Client sends a transfer request through the **API Gateway**.
-2. **Transaction Service** creates a transaction with status `PENDING` and publishes an event to Kafka.
-3. **Fraud Detection Service** consumes the event and evaluates it against the fraud rules.
-4. If the transaction is **clean**, **Payment Service** debits the sender and credits the receiver, and the status becomes `COMPLETED`.
-5. If the transaction is **flagged** or the payment **fails**, a refund is triggered and the status becomes `FAILED` / `REFUNDED`.
-6. **Notification Service** consumes the final event and notifies the user.
+A typical transfer follows this lifecycle:
 
+```text
+Client
+  │
+  ▼
+API Gateway
+  │
+  ▼
+Transaction Service
+  │
+  │ Create transaction
+  │ status = PENDING
+  ▼
+Kafka
+  │
+  ▼
+Fraud Detection Service
+  │
+  ├─────────────── Clean ───────────────┐
+  │                                     ▼
+  │                              Payment Service
+  │                                     │
+  │                            Debit → Credit
+  │                                     │
+  │                                     ▼
+  │                              COMPLETED
+  │
+  └────────────── Suspicious ───────────┐
+                                        ▼
+                                  Refund Flow
+                                        │
+                                        ▼
+                                    REFUNDED
+
+                    Final Event
+                         │
+                         ▼
+                Notification Service
 ```
-PENDING ──► (fraud check) ──► COMPLETED
-                │
-                └──► FLAGGED / FAILED ──► REFUNDED
+
+### Transaction states
+
+```text
+PENDING
+   │
+   ├── Fraud check passed ──► COMPLETED
+   │
+   └── Fraud / Payment failure
+              │
+              ▼
+           REFUNDED
 ```
 
 ---
 
-## Tech Stack
+## Microservices
 
-| Layer | Technology |
-|---|---|
-| Language | Java |
-| Framework | Spring Boot |
-| Messaging | Apache Kafka |
-| Database | MySQL |
-| Cache / OTP store | Redis |
-| API style | REST |
-| Containerization | Docker, Docker Compose |
-| Build tool | Maven |
+| Service                     | Responsibility                                             |
+| --------------------------- | ---------------------------------------------------------- |
+| **API Gateway**             | Single entry point and request routing                     |
+| **Account Service**         | Account management, balance operations, debit/credit       |
+| **Transaction Service**     | Transaction creation, tracking, and lifecycle management   |
+| **Payment Service**         | Executes fund movement between accounts                    |
+| **Fraud Detection Service** | Evaluates transactions against fraud detection rules       |
+| **Notification Service**    | Consumes transaction events and handles user notifications |
+
+---
+
+## Event-Driven Communication
+
+Apache Kafka is used to decouple services and allow transaction processing to happen asynchronously.
+
+Instead of tightly coupling services through synchronous REST calls:
+
+```text
+Transaction Service
+        │
+        ▼
+     Kafka Event
+        │
+   ┌────┴─────────────┐
+   ▼                  ▼
+Fraud Detection   Notification
+```
+
+This allows individual services to react to events independently.
+
+### Example event flow
+
+```text
+Transaction Created
+        ↓
+transaction event
+        ↓
+Fraud Detection
+        ↓
+fraud result
+        ↓
+Payment / Refund
+        ↓
+Final transaction event
+        ↓
+Notification
+```
+
+---
+
+## Redis & OTP
+
+Redis is used for OTP storage because OTPs are temporary data.
+
+```text
+Generate OTP
+     │
+     ▼
+Store in Redis
+     │
+     └── TTL
+          │
+          ▼
+      Auto Expiration
+```
+
+Using Redis TTL eliminates the need to manually remove expired OTP records from a relational database.
+
+---
+
+## Compensating Refunds
+
+Distributed financial operations can involve multiple services and therefore cannot simply rely on a single database transaction across the entire system.
+
+The project uses a **compensating action** approach.
+
+For example:
+
+```text
+Debit Sender
+     │
+     ▼
+Payment Failure / Fraud
+     │
+     ▼
+Compensating Refund
+     │
+     ▼
+Restore Sender Balance
+```
+
+This prevents a failed transaction from leaving the system in an inconsistent state.
+
+---
+
+## Technology Stack
+
+| Category                  | Technology     |
+| ------------------------- | -------------- |
+| Language                  | Java           |
+| Framework                 | Spring Boot    |
+| Architecture              | Microservices  |
+| API                       | REST           |
+| Messaging                 | Apache Kafka   |
+| Database                  | MySQL          |
+| Cache / Temporary Storage | Redis          |
+| Containerization          | Docker         |
+| Orchestration             | Docker Compose |
+| Build Tool                | Maven          |
+
+---
+
+## Project Structure
+
+```text
+Digital-Banking-Fraud-Detection-System/
+│
+├── api-gateway/
+│
+├── account-service/
+│
+├── transaction-service/
+│
+├── payment-service/
+│
+├── fraud-detection-service/
+│
+├── notification-service/
+│
+└── docker-compose.yml
+```
 
 ---
 
@@ -113,79 +270,89 @@ PENDING ──► (fraud check) ──► COMPLETED
 
 ### Prerequisites
 
-- Java 17+
-- Maven 3.8+
-- Docker and Docker Compose
+Make sure you have:
 
-### 1. Clone the repository
+* Java 17+
+* Maven 3.8+
+* Docker
+* Docker Compose
+
+### Clone the repository
 
 ```bash
 git clone https://github.com/MrPopZzz/Digital-Banking-Fraud-Detection-System.git
+
 cd Digital-Banking-Fraud-Detection-System
 ```
 
-### 2. Start the infrastructure and services
+### Start the application
 
 ```bash
 docker-compose up --build
 ```
 
-This starts all services along with their dependencies defined in `docker-compose.yml`.
+Docker Compose starts the services and infrastructure defined in the project configuration.
 
-### 3. Run a single service locally (optional)
+### Run an individual service locally
+
+For example:
 
 ```bash
 cd transaction-service
+
 mvn spring-boot:run
 ```
 
-### 4. Verify
-
-Send a request through the API Gateway.
+The application can then be accessed through the configured API Gateway.
 
 ---
 
----
+## Key Design Decisions
 
-## Design Decisions
+### Event-driven communication
 
-- **Event-driven with Kafka** – services stay loosely coupled; fraud checks, payments and notifications react to events instead of calling each other synchronously.
-- **Database per service** – each service owns its data, so a change in one does not break the others.
-- **Redis for OTPs** – OTPs are short-lived by nature, so a key with a TTL is simpler and faster than a database table.
-- **Compensating refunds** – if any step after the debit fails, the system refunds instead of leaving money in an inconsistent state.
-- **API Gateway** – one public entry point keeps internal service addresses hidden and makes cross-cutting concerns (routing, auth) easy to add later.
+Kafka decouples services and allows fraud detection and notifications to process transaction events asynchronously.
 
----
+### Database per service
 
-## Project Structure
+Each microservice owns its persistent data, reducing direct coupling between services.
 
-```
-Digital-Banking-Fraud-Detection-System/
-├── api-gateway/
-├── account-service/
-├── transaction-service/
-├── payment-service/
-├── fraud-detection-service/
-├── notification-service/
-└── docker-compose.yml
-```
+### Redis for OTPs
+
+OTP data is temporary and therefore benefits from Redis's fast access and TTL-based expiration.
+
+### Compensating transactions
+
+Instead of attempting a distributed database transaction across services, failed operations can trigger compensating actions such as refunds.
+
+### API Gateway
+
+The Gateway provides a single public entry point while keeping internal service endpoints isolated.
 
 ---
 
 ## Future Improvements
 
-- JWT-based authentication and role-based access at the gateway
-- Machine-learning based fraud scoring on top of the rule engine
-- Idempotency keys to prevent duplicate transfers
-- Dead-letter topics and retry policies for failed Kafka events
-- Distributed tracing (Micrometer / Zipkin) and centralized logging
-- Unit and integration tests with Testcontainers
-- CI pipeline with GitHub Actions
+The project can be extended with:
+
+* [ ] JWT authentication and role-based authorization
+* [ ] Idempotency keys for duplicate-transfer protection
+* [ ] Kafka retry mechanisms and Dead Letter Topics
+* [ ] Circuit breakers and resilience patterns
+* [ ] Distributed tracing with Micrometer / Zipkin
+* [ ] Centralized logging
+* [ ] Machine-learning-based fraud scoring
+* [ ] Unit and integration testing with Testcontainers
+* [ ] CI/CD using GitHub Actions
+* [ ] OpenAPI / Swagger documentation
+* [ ] Observability with Prometheus and Grafana
 
 ---
 
 ## Author
 
-**Sayan Chakraborty** – Java Backend Developer
+**Sayan Chakraborty**
 
-- GitHub: [@MrPopZzz](https://github.com/MrPopZzz)
+Java Backend Developer
+
+GitHub: [@MrPopZzz](https://github.com/MrPopZzz)
